@@ -1,0 +1,202 @@
+#include <WiFi.h>
+#include <FirebaseESP32.h>
+#include <Arduino.h>
+#include <DHT.h>
+
+#define DHTTYPE DHT11
+#define DHTPin 5       // Chân kết nối DHT11 (GPIO 5 trên ESP32)
+#define button1 12      // Chân kết nối nút nhấn1 (GPIO 12 trên ESP32)
+#define button2 14      // Chân kết nối nút nhấn2 (GPIO 14 trên ESP32)
+#define led1 15        // Chân kết nối LED1 (GPIO 15 trên ESP32)
+#define led2 13        // Chân kết nối LED2 (GPIO 13 trên ESP32)
+
+// Khai báo cảm biến DHT11
+DHT dht(DHTPin, DHTTYPE);
+float nhietdo;
+float doam;
+
+// Khai báo nút nhấn và trạng thái
+volatile bool button1Pressed = false;
+volatile bool button2Pressed = false;
+bool led1State = false;
+bool led2State = false;
+bool isConnected = false;
+
+// Thời gian chờ kết nối WiFi
+unsigned long wifiConnectTimeout = 30000; // 30 giây
+unsigned long lastConnectionAttempt = 0;  // Lần cố gắng kết nối WiFi gần nhất
+
+// Kết nối đến Firebase và WiFi
+#define FIREBASE_HOST "test01-41b94-default-rtdb.asia-southeast1.firebasedatabase.app"
+#define FIREBASE_AUTH "3BIn8m0sSRHHpICsq5tkevPlv2gGy0nWVmvMzEox"
+#define WIFI_SSID "kerry"
+#define WIFI_PASSWORD "23072004"
+
+FirebaseData firebaseData;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+String path = "ESP32 NodeMCU Board/Outputs/Digital/";
+
+void setup() {
+    Serial.begin(115200);
+    delay(1000);
+
+    pinMode(DHTPin, INPUT);
+    dht.begin();
+    pinMode(led1, OUTPUT);
+    pinMode(led2, OUTPUT);
+    digitalWrite(led1, LOW);
+    digitalWrite(led2, LOW);
+
+    // Khởi tạo nút nhấn
+    pinMode(button1, INPUT_PULLUP);
+    pinMode(button2, INPUT_PULLUP);
+    attachInterrupt(button1, ISR1, FALLING);
+    attachInterrupt(button2, ISR2, FALLING);
+    Serial.println("********* Hệ thống bắt đầu khởi chạy ********");
+
+    // Kết nối WiFi
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    lastConnectionAttempt = millis();
+    Serial.print("Đang kết nối tới: ");
+    Serial.println(WIFI_SSID);
+
+    // Cấu hình Firebase
+    config.database_url = FIREBASE_HOST;
+    config.signer.tokens.legacy_token = FIREBASE_AUTH;
+    Firebase.begin(&config, &auth);
+
+    // Khởi tạo trạng thái LED trong Firebase
+    Firebase.setString(firebaseData, path + "LED1", "OFF");
+    Firebase.setString(firebaseData, path + "LED2", "OFF");
+
+    Firebase.reconnectWiFi(true);
+    delay(1000);
+}
+
+void loop() {
+    handleWiFiConnection();
+    handleButtonPress();
+    handleButtonPress2();
+    updateLEDStatesFromFirebase();
+    updateSensorDataToFirebase();
+}
+
+// Quản lý kết nối WiFi
+void handleWiFiConnection() {
+    if (!isConnected && millis() - lastConnectionAttempt > wifiConnectTimeout) {
+        WiFi.disconnect();
+        Serial.println("Không kết nối được WiFi. Đã ngắt kết nối.");
+    }
+
+    if (isConnected && WiFi.status() != WL_CONNECTED) {
+        Serial.println("Đang cố gắng kết nối lại WiFi...");
+        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+        lastConnectionAttempt = millis();
+    }
+
+    if (WiFi.status() == WL_CONNECTED && !isConnected) {
+        isConnected = true;
+        Serial.println("Đã kết nối WiFi");
+        Serial.print("Địa chỉ IP : ");
+        Serial.println(WiFi.localIP());
+    } 
+}
+
+// Quản lý nút nhấn 1
+void handleButtonPress() {
+    if (button1Pressed) {
+        button1Pressed = false;
+        led1State = !led1State;
+        digitalWrite(led1, led1State ? HIGH : LOW);
+        updateLEDStateInFirebase("LED1", led1State);
+    }
+}
+
+// Quản lý nút nhấn 2
+void handleButtonPress2() {
+    if (button2Pressed) {
+        button2Pressed = false;
+        led2State = !led2State;
+        digitalWrite(led2, led2State ? HIGH : LOW);
+        updateLEDStateInFirebase("LED2", led2State);
+    }
+}
+
+// Cập nhật trạng thái LED từ Firebase
+void updateLEDStatesFromFirebase() {
+    if (WiFi.status() == WL_CONNECTED) {
+        updateLEDStateFromFirebase("LED1", led1);
+        updateLEDStateFromFirebase("LED2", led2);
+    }
+}
+
+// Cập nhật dữ liệu cảm biến lên Firebase
+void updateSensorDataToFirebase() {
+    if (WiFi.status() == WL_CONNECTED) {
+        nhietdo = dht.readTemperature();
+        doam = dht.readHumidity();
+        if (!isnan(nhietdo)) {
+            if (Firebase.setFloat(firebaseData, "ESP32 NodeMCU Board/Outputs/Sensor/temp", nhietdo)) {
+                Serial.print("Nhiệt độ: ");
+                Serial.println(nhietdo);
+            } else {
+                Serial.println("Không thể cập nhật nhiệt độ lên Firebase.");
+            }
+        }
+        if (!isnan(doam)) {
+            if (Firebase.setFloat(firebaseData, "ESP32 NodeMCU Board/Outputs/Sensor/humidity", doam)) {
+                Serial.print("Độ ẩm: ");
+                Serial.println(doam);
+            } else {
+                Serial.println("Không thể cập nhật độ ẩm lên Firebase.");
+            }
+        }
+    }
+}
+
+// Cập nhật trạng thái LED lên Firebase
+void updateLEDStateInFirebase(const String& led, bool state) {
+    if (WiFi.status() == WL_CONNECTED) {
+        if (Firebase.setString(firebaseData, path + led, state ? "ON" : "OFF")) {
+            Serial.print(led);
+            Serial.println(state ? " ON" : " OFF");
+        } else {
+            Serial.println("Không thể cập nhật trạng thái LED lên Firebase.");
+        }
+    } else {
+        Serial.print(led);
+        Serial.println(state ? " ON" : " OFF");
+    }
+}
+
+// Lấy trạng thái LED từ Firebase
+void updateLEDStateFromFirebase(const String& led, int pin) {
+    if (Firebase.getString(firebaseData, path + led)) {
+        String fireStatus = firebaseData.stringData();
+        if (fireStatus == "ON") {
+            digitalWrite(pin, HIGH);
+            Serial.print(led);
+            Serial.println(" đã bật");
+        } else if (fireStatus == "OFF") {
+            digitalWrite(pin, LOW);
+            Serial.print(led);
+            Serial.println(" đã tắt");
+        } else {
+            Serial.println("Lỗi! Vui lòng nhập cú pháp đúng");
+        }
+    } else {
+        Serial.println("Không thể lấy trạng thái từ Firebase.");
+    }
+}
+
+// Hàm ngắt ngoài cho nút 1
+IRAM_ATTR void ISR1() {
+    button1Pressed = true;
+}
+
+// Hàm ngắt ngoài cho nút 2
+IRAM_ATTR void ISR2() {
+    button2Pressed = true;
+}
